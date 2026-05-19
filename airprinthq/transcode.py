@@ -6,17 +6,20 @@ paper. Since our host always has A4 loaded, we rewrite every page to
 be A4-sized:
 
 - Page already A4 (within ~0.7mm tolerance): pass through.
-- Page smaller than A4: place on a blank A4 page, centered.
-- Page larger than A4: scale down to fit (aspect-ratio-preserving),
-  then center on a blank A4 page.
+- Page smaller than A4: place on a blank A4 page, centered, 100% size.
+- Page slightly larger than A4 (e.g. Letter): place on a blank A4
+  page centered at 100%, accept ~10pt margin-area clip per side.
+- Page significantly larger than A4 (e.g. Legal, A3): scale down to
+  fit (aspect-ratio-preserving), then center.
 
-For JPEG / TIFF inputs (rare — iOS prefers PDF when our `pdl` includes
-both `application/pdf` and `image/jpeg`), we decode with Pillow, save
-as a PDF at a DPI computed to give the right physical size, then run
-the result through the same A4 normalisation.
+URF inputs (Apple Unified Raster Format, what iOS sends for monochrome
+multi-copy jobs) are decoded by `airprinthq.urf` into a multi-page PDF,
+then run through the same A4 pipeline. URF decoding failures raise —
+we never pass raw URF bytes through, because the Canon's port-9100
+dispatcher cannot decode URF and would print megabytes of garbage.
 
-Unknown formats and any transcode failure return the original bytes
-unchanged — better to print wrong than to abort the job.
+Unknown formats and non-URF transcode failures return the original
+bytes unchanged — better to print wrong than to abort the job.
 """
 
 from __future__ import annotations
@@ -29,21 +32,33 @@ log = logging.getLogger(__name__)
 # 1 point = 1/72 inch; A4 = 210 × 297 mm = 595.276 × 841.890 pt
 A4_W_PT = 595.0
 A4_H_PT = 842.0
-TOLERANCE_PT = 2.0          # ~0.7mm
-IMG_MARGIN_PT = 36          # 0.5 inch on each side for image-to-PDF wrapping
+TOLERANCE_PT = 2.0          # ~0.7mm; pages within this of A4 are "already A4"
+# Max allowed clip per side when centering an oversized page on A4 without
+# scaling. ~10pt = ~3.5mm — comfortably inside the margin of typical
+# Letter/A4 documents. Letter (612×792) is 17pt wider than A4 → 8.5pt per
+# side, within tolerance: we center it instead of shrinking by 3%. Legal
+# (612×1008) is 166pt taller → 83pt per side, beyond tolerance: fall back
+# to scale-to-fit.
+MAX_CLIP_PER_SIDE_PT = 10.0
 
 
 def transcode_to_a4(data: bytes) -> bytes:
-    """Return PDF bytes whose every page is A4. Pass-through on failure."""
-    try:
-        if data[:4] == b"%PDF":
+    """Return PDF bytes whose every page is A4.
+
+    For URF input, raises on decode failure — we never pass raw URF
+    through (Canon can't decode it). For PDF input, pass-through on
+    decode failure. For other formats, pass through unchanged.
+    """
+    # URF must succeed-or-raise. Never pass raw URF bytes downstream.
+    if data[:8] == b"UNIRAST\x00":
+        from . import urf
+        pdf_bytes = urf.to_pdf(data)
+        return _pdf_to_a4(pdf_bytes)
+    if data[:4] == b"%PDF":
+        try:
             return _pdf_to_a4(data)
-        if data[:3] == b"\xff\xd8\xff":
-            return _image_to_a4(data)
-        if data[:4] in (b"II*\x00", b"MM\x00*"):
-            return _image_to_a4(data)
-    except Exception:
-        log.exception("transcode failed; forwarding raw bytes")
+        except Exception:
+            log.exception("PDF transcode failed; forwarding raw bytes")
     return data
 
 
@@ -61,8 +76,17 @@ def _pdf_to_a4(pdf_bytes: bytes) -> bytes:
                 and abs(src_h - A4_H_PT) < TOLERANCE_PT):
             writer.add_page(page)
             continue
-        # Scale-to-fit A4 with aspect preserved; never upscale (cap at 1.0).
-        scale = min(A4_W_PT / src_w, A4_H_PT / src_h, 1.0)
+        # If the source is "close enough" to A4 (Letter is the canonical
+        # example), keep content at 100% and just center on A4, accepting
+        # up to ~10pt of margin-area clip per side. Otherwise fall back to
+        # scale-to-fit (Legal, A3, etc.).
+        w_excess = max(0.0, (src_w - A4_W_PT) / 2)
+        h_excess = max(0.0, (src_h - A4_H_PT) / 2)
+        if (w_excess <= MAX_CLIP_PER_SIDE_PT
+                and h_excess <= MAX_CLIP_PER_SIDE_PT):
+            scale = 1.0
+        else:
+            scale = min(A4_W_PT / src_w, A4_H_PT / src_h, 1.0)
         target_w = src_w * scale
         target_h = src_h * scale
         tx = (A4_W_PT - target_w) / 2
@@ -81,23 +105,3 @@ def _pdf_to_a4(pdf_bytes: bytes) -> bytes:
     return buf.getvalue()
 
 
-def _image_to_a4(image_bytes: bytes) -> bytes:
-    from PIL import Image
-
-    img = Image.open(io.BytesIO(image_bytes))
-    if img.mode in ("RGBA", "LA", "P"):
-        img = img.convert("RGB")
-    iw, ih = img.size
-    # Target page size in points: scale-to-fit inside A4 minus margins,
-    # preserve aspect ratio, never upscale.
-    max_w = A4_W_PT - 2 * IMG_MARGIN_PT
-    max_h = A4_H_PT - 2 * IMG_MARGIN_PT
-    scale = min(max_w / iw, max_h / ih, 1.0)
-    # PIL's PDF page size = pixels / DPI inches = (72 * pixels) / DPI points.
-    # We want page width = scale * iw points, so DPI = 72 / scale.
-    dpi = 72.0 / scale
-    tmp = io.BytesIO()
-    img.save(tmp, format="PDF", resolution=dpi)
-    log.info("wrapped %dx%d image into PDF page (%.0fx%.0f pt, DPI=%.0f)",
-             iw, ih, iw * scale, ih * scale, dpi)
-    return _pdf_to_a4(tmp.getvalue())

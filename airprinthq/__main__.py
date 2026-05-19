@@ -89,7 +89,7 @@ async def amain() -> int:
         return 2
 
     formats = _env_list("IPP_DOCUMENT_FORMAT_SUPPORTED",
-                        ["application/pdf", "image/jpeg", "image/tiff", "image/urf"])
+                        ["application/pdf", "image/urf"])
     format_default = _env_str("IPP_DOCUMENT_FORMAT_DEFAULT", "application/pdf")
     media = _env_list("IPP_MEDIA_SUPPORTED", ["iso_a4_210x297mm"])
     media_default = _env_str("IPP_MEDIA_DEFAULT", "iso_a4_210x297mm")

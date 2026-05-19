@@ -13,8 +13,10 @@ else (DPI, color/duplex, URF string, sides, copies, etc.) is hardcoded.
 
 from __future__ import annotations
 
+import time
 import uuid as _uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from . import ipp_codec as ipp
 
@@ -26,7 +28,7 @@ _PROXY_UUID_NS = _uuid.UUID("e1a3f9c2-1f6e-4d4e-bd8a-1c2d3e4f5a6b")
 # image/urf must be in document-format-supported AND the URF= TXT key
 # must match urf-supported — iOS rejects an inconsistent pair.
 # Value lifted verbatim from a Canon LBP673C II with AirPrint on.
-DEFAULT_URF = "ADOBERGB24,CP255,PQ4,RS300,SRGB24,W8-16,DM1,FN3,IS1-4,OB10-40,V1.5"
+DEFAULT_URF = "CP255,DEVCMYK32,PQ5,RS600,SRGB24,W8-16,DM3,FN3,IS1-4,OB10-40,V1.5"
 
 
 @dataclass
@@ -57,6 +59,15 @@ def _airprint_txt(bonjour_name: str, formats: list[str], urf: str,
         "adminurl": adminurl,
         "Color": "T" if color else "F",
         "Duplex": "T" if duplex else "F",
+        # Apple BPS enum: <legal-A4 (smaller), legal-A4 (office tier
+        # covering both Legal and A4), tabloid-A3, isoC-A2, >isoC-A2.
+        # No A4-only value exists; legal-A4 is the closest match.
+        "PaperMax": "legal-A4",
+        # kind= controls which paper-size categories iOS surfaces in the
+        # print dialog dropdown. "photo" is required for 5×7 to appear
+        # (3.5×5 and 4×6 also exist as index-card sizes under "document",
+        # so they appear regardless).
+        "kind": "document,photo,postcard",
         "UUID": uuid_str.removeprefix("urn:uuid:"),
     }
     if "image/urf" in formats:
@@ -89,6 +100,16 @@ def build_standalone(bonjour_name: str,
     assert ipp_uri or ipps_uri, "at least one URI must be set"
     proxy_uuid = "urn:uuid:" + str(_uuid.uuid5(_PROXY_UUID_NS, bonjour_name))
 
+    # printer-config-change-* / printer-state-change-* are how iOS knows
+    # to invalidate its cached Get-Printer-Attributes response: when these
+    # bump, iOS refetches. We anchor them at process-start so every
+    # service restart invalidates iOS's cache.
+    now = datetime.now(timezone.utc)
+    change_ts_int = int(time.time())
+    change_ts_dt = ipp.encode_date_time(
+        now.year, now.month, now.day,
+        now.hour, now.minute, now.second)
+
     printer = ipp.Group(tag=ipp.TAG_PRINTER, attributes=[
         ipp.str_attr("printer-name", ipp.TAG_NAME_WITHOUT_LANG, bonjour_name),
         ipp.str_attr("printer-info", ipp.TAG_TEXT_WITHOUT_LANG, bonjour_name),
@@ -110,6 +131,12 @@ def build_standalone(bonjour_name: str,
         ipp.bool_attr("printer-is-accepting-jobs", True),
         ipp.int_attr("queued-job-count", 0),
         ipp.int_attr("printer-up-time", 1),
+        ipp.int_attr("printer-config-change-time", change_ts_int),
+        ipp.attr("printer-config-change-date-time",
+                 ipp.TAG_DATE_TIME, change_ts_dt),
+        ipp.int_attr("printer-state-change-time", change_ts_int),
+        ipp.attr("printer-state-change-date-time",
+                 ipp.TAG_DATE_TIME, change_ts_dt),
         ipp.int_attr("operations-supported",
                      ipp.OP_PRINT_JOB, ipp.OP_VALIDATE_JOB,
                      ipp.OP_CREATE_JOB, ipp.OP_SEND_DOCUMENT,

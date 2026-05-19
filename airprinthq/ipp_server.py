@@ -146,10 +146,12 @@ def op_validate_job(state: ServerState, request: ipp.IppMessage) -> ipp.IppMessa
 def op_print_job(state: ServerState, request: ipp.IppMessage) -> ipp.IppMessage:
     op = _op_group(request)
     job_name = _string_value(op.get("job-name"), "AirPrint job")
+    copies = max(1, _int_value(op.get("copies"), 1))
     document = request.data
     if not document:
         log.warning("Print-Job with no document data")
-    job = Job(job_id=state.new_job_id(), name=job_name, document=document)
+    job = Job(job_id=state.new_job_id(), name=job_name, document=document,
+              copies=copies)
     state.jobs[job.job_id] = job
     state.forwarder.submit(job)
     resp = _base_response(request, ipp.STATUS_OK)
@@ -160,7 +162,9 @@ def op_print_job(state: ServerState, request: ipp.IppMessage) -> ipp.IppMessage:
 def op_create_job(state: ServerState, request: ipp.IppMessage) -> ipp.IppMessage:
     op = _op_group(request)
     job_name = _string_value(op.get("job-name"), "AirPrint job")
-    job = Job(job_id=state.new_job_id(), name=job_name, document=b"")
+    copies = max(1, _int_value(op.get("copies"), 1))
+    job = Job(job_id=state.new_job_id(), name=job_name, document=b"",
+              copies=copies)
     state.jobs[job.job_id] = job
     state.pending_buffers[job.job_id] = bytearray()
     resp = _base_response(request, ipp.STATUS_OK)

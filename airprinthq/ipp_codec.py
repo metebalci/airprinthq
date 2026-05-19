@@ -274,6 +274,18 @@ def encode_range_of_integer(lo: int, hi: int) -> bytes:
     return struct.pack(">ii", lo, hi)
 
 
+def encode_date_time(year: int, month: int, day: int,
+                     hour: int, minute: int, second: int,
+                     deciseconds: int = 0,
+                     utc_offset_minutes: int = 0) -> bytes:
+    """IPP dateTime: 11 bytes (RFC 8011 §5.1.15 / RFC 1903 §3.1.18)."""
+    direction = b"+" if utc_offset_minutes >= 0 else b"-"
+    h_off, m_off = divmod(abs(utc_offset_minutes), 60)
+    return struct.pack(">HBBBBBBcBB",
+                       year, month, day, hour, minute, second,
+                       deciseconds, direction, h_off, m_off)
+
+
 # --- attribute construction shortcuts ---------------------------------
 
 def attr(name: str, tag: int, *values: bytes) -> Attribute:

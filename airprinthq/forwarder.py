@@ -43,6 +43,8 @@ def _ext_for_bytes(data: bytes) -> str:
         return "jpg"
     if data[:4] in (b"II*\x00", b"MM\x00*"):
         return "tif"
+    if data[:8] == b"UNIRAST\x00":
+        return "urf"
     return "bin"
 
 
@@ -63,6 +65,7 @@ class Job:
     job_id: int
     name: str
     document: bytes
+    copies: int = 1                 # honored by the forwarder: N TCP sends
     state: str = "pending"          # pending | processing | completed | canceled | aborted
     cancelled: bool = False
     done: asyncio.Event = field(default_factory=asyncio.Event)
@@ -110,7 +113,16 @@ class Forwarder:
         job.state = "processing"
         if _SAVE_INCOMING_DIR:
             _save(_SAVE_INCOMING_DIR, job.job_id, job.document, "incoming")
-        document = transcode.transcode_to_a4(job.document)
+        try:
+            document = transcode.transcode_to_a4(job.document)
+        except Exception as exc:
+            # URF decode failure (or any other hard transcode error)
+            # ends the job — never send raw URF bytes to the printer.
+            job.state = "aborted"
+            job.error = f"transcode failed: {exc}"
+            job.done.set()
+            log.exception("job %s: transcode failed; aborted", job.job_id)
+            return
         if _SAVE_OUTGOING_DIR:
             _save(_SAVE_OUTGOING_DIR, job.job_id, document, "outgoing")
         if self.host is None:
@@ -119,24 +131,36 @@ class Forwarder:
             log.info("job %s observe-only (%d -> %d bytes); not forwarded",
                      job.job_id, len(job.document), len(document))
             return
-        log.info("forwarding job %s (%d bytes) to %s:%s",
-                 job.job_id, len(document), self.host, self.port)
+        copies = max(1, job.copies)
+        log.info("forwarding job %s (%d bytes × %d copies) to %s:%s",
+                 job.job_id, len(document), copies, self.host, self.port)
         writer = None
         try:
-            _, writer = await asyncio.open_connection(self.host, self.port)
-            for offset in range(0, len(document), _CHUNK):
+            for copy_n in range(1, copies + 1):
                 if job.cancelled:
-                    log.info("job %s canceled mid-stream", job.job_id)
-                    writer.close()
-                    await writer.wait_closed()
+                    log.info("job %s canceled before copy %d/%d",
+                             job.job_id, copy_n, copies)
                     job.state = "canceled"
                     return
-                writer.write(document[offset:offset + _CHUNK])
-                await writer.drain()
-            writer.close()
-            await writer.wait_closed()
+                _, writer = await asyncio.open_connection(self.host, self.port)
+                for offset in range(0, len(document), _CHUNK):
+                    if job.cancelled:
+                        log.info("job %s canceled mid-stream on copy %d/%d",
+                                 job.job_id, copy_n, copies)
+                        writer.close()
+                        await writer.wait_closed()
+                        job.state = "canceled"
+                        return
+                    writer.write(document[offset:offset + _CHUNK])
+                    await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+                writer = None
+                if copies > 1:
+                    log.info("job %s copy %d/%d sent",
+                             job.job_id, copy_n, copies)
             job.state = "completed"
-            log.info("job %s completed", job.job_id)
+            log.info("job %s completed (%d copies)", job.job_id, copies)
         except Exception as exc:
             job.state = "aborted"
             job.error = str(exc)
