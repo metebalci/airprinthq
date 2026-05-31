@@ -5,15 +5,15 @@
 I started this project because I wanted to print photos from my iPhone
 to my A4-only printer without iOS scaling them up to fill the sheet —
 a 4×6 photo should print at 4×6 size, centered on the A4 paper, with
-white margins around it. And while I was at it, US Letter documents
-should land on A4 without the default ~3% downscale every print pipeline
-applies. That was the original itch; everything else here (URF decoding,
+white margins around it. While I was at it, I also wanted US Letter documents
+to print on A4 at full size — not shrunk by the ~3% that every print
+pipeline applies by default. That was the original itch; everything else here (URF decoding,
 multi-copy, observe-only mode, the AirPrint protocol detective work)
 accumulated as the project grew to handle whatever iOS sent.
 
-Standalone IPP/AirPrint proxy. Announces itself on Bonjour as an AirPrint
-printer with hardcoded capabilities and forwards every print job as raw
-bytes to a real printer's port 9100. Useful when:
+It's a standalone IPP/AirPrint proxy. It announces itself on Bonjour as an
+AirPrint printer with a fixed set of capabilities, then forwards every print
+job straight to a real printer's port 9100 as raw bytes. It's handy when:
 
 - You want iOS/macOS AirPrint to print PDFs to a printer whose own IPP
   capabilities don't advertise `application/pdf` (but whose port 9100
@@ -39,43 +39,40 @@ bytes to a real printer's port 9100. Useful when:
   same A4 normalizer used for native PDF jobs.
 - You want full control over what capabilities get announced.
 
-**Scope:** specifically created and tested for a Canon LBP673Cdw II
-printer behind a host running Ubuntu 26.04. It will probably work for
-other printers whose port-9100 dispatcher auto-detects PDF, but
-the hardcoded capabilities in `airprinthq/caps.py` (URF string, media
-list, color/duplex defaults) are tailored to that Canon model and have
-not been validated against anything else.
+**Scope:** I built and tested this for one setup — a Canon LBP673Cdw II
+printer behind a host running Ubuntu 26.04. It should work for other
+printers whose port-9100 dispatcher auto-detects PDF, but I haven't tried
+any. The hardcoded capabilities in `airprinthq/caps.py` (URF string, media
+list, color/duplex defaults) are tailored to that Canon, so treat anything
+else as untested.
 
-**URF & B&W handling.** Two facts about iOS + the Canon LBP673C II are
-relevant:
+**URF & B&W handling.** Two things about iOS and the Canon LBP673C II shape
+how this works:
 
-1. **iOS requires `image/urf` in `pdl=` to submit any AirPrint job** at
-   all — color, B&W, single, multi-copy. Without URF in our advertised
-   pdl, iOS shows the printer but silently refuses to print. So we
+1. **iOS won't submit any AirPrint job unless `image/urf` is in our
+   `pdl=`** — color, B&W, single, or multi-copy, it doesn't matter. Leave
+   URF out and iOS shows the printer but silently refuses to print. So I
    keep `image/urf` in the default `IPP_DOCUMENT_FORMAT_SUPPORTED`.
-2. **The Canon's port-9100 dispatcher cannot decode URF.** Sending
-   raw URF to the printer produces megabytes of garbage characters as
-   the dispatcher falls back to text mode. So we never forward URF
-   directly.
+2. **The Canon's port-9100 dispatcher can't decode URF.** Send it raw URF
+   and the dispatcher falls back to text mode and spews megabytes of
+   garbage characters. So I never forward URF to the printer directly.
 
-To bridge these, `airprinthq/urf.py` contains a from-scratch Python
-decoder for Apple's URF format (no public spec; built by reverse-
-engineering the captured byte layout and the standard PackBits-style
-RLE the format uses). When iOS sends a job as URF (typically for
-explicit B&W content or multi-copy jobs — iOS expands copies as extra
-URF pages), the transcoder pipes the bytes through `urf.to_pdf()` first,
-yielding a multi-page PDF at the URF's native DPI, which then flows
-through the same A4 normalizer used for native PDF input. The Canon
-only ever sees PDF. URF decoding failures abort the job rather than
-forward potentially-garbage bytes.
+To bridge that gap, `airprinthq/urf.py` is a from-scratch Python decoder
+for Apple's URF format. There's no public spec, so I reverse-engineered it
+from the captured byte layout and the PackBits-style RLE it uses. When iOS
+sends a job as URF (usually explicit B&W content, or multi-copy jobs — iOS
+expands copies into extra URF pages), the transcoder runs the bytes through
+`urf.to_pdf()` first. That gives a multi-page PDF at the URF's native DPI,
+which then flows through the same A4 normalizer as a native PDF job. The
+Canon only ever sees PDF. If URF decoding fails, the job is aborted rather
+than forwarding potentially-garbage bytes.
 
-**Copies semantics.** We honor the IPP `copies` operation attribute via
-a TCP loop in the forwarder: send the (transcoded) PDF to the printer's
-port 9100 `N` times for `copies=N`. For URF jobs, iOS typically expands
-copies into multi-page URF documents itself, so each page already
-represents one copy and the forwarder just sends the multi-page PDF
-once — same end result. Cancellation is honored both between copies
-and mid-stream within a copy.
+**Copies semantics.** The forwarder honors the IPP `copies` attribute with
+a simple TCP loop: for `copies=N`, it sends the transcoded PDF to port 9100
+`N` times. With URF jobs iOS usually expands the copies into a multi-page
+URF document itself, so each page is already one copy and the forwarder
+just sends that PDF once — same result either way. Cancellation works both
+between copies and mid-stream within a copy.
 
 ## What works, what doesn't
 
@@ -110,13 +107,13 @@ and mid-stream within a copy.
 
 ### Known limitations
 
-- The iOS print dialog shows paper sizes and toggles we can't control
-  (iOS uses hardcoded per-locale UI lists and ignores most of our IPP
-  declarations for UI purposes). Functionally moot — the transcoder
-  normalizes whatever iOS sends to A4 anyway.
-- The Color / B&W toggle is iOS-side UI; we can't hide it.
-- "Print PDF Annotations" toggle is iOS-side; we can't change the
-  default or hide it.
+- The iOS print dialog shows paper sizes and toggles that can't be
+  controlled — iOS uses hardcoded per-locale UI lists and ignores most of
+  the IPP declarations for UI purposes. It's functionally moot, since the
+  transcoder normalizes whatever iOS sends to A4 anyway.
+- The Color / B&W toggle is iOS-side UI and can't be hidden.
+- The "Print PDF Annotations" toggle is iOS-side too; its default can't be
+  changed and it can't be hidden.
 
 ### Deferred (not implemented)
 
@@ -294,20 +291,19 @@ printer.
 
 ## How it works (one paragraph)
 
-We don't query the real printer. Capabilities are hardcoded in
-`build_standalone()` and announced verbatim. mDNS publication is
-delegated to `avahi-daemon` via `avahi-publish-service` subprocesses
-(this is required because iOS's AirPrint validator needs RFC 6763
-§7.1-compliant subtype PTRs, which python-zeroconf can't emit). We
-listen on plain IPP port 631 by default (IPPS is optional). When a
-client POSTs `/ipp/print`, `ipp_server` parses the IPP message (RFC
-8010 codec in `ipp_codec`), accepts the job and returns immediately
-with `job-state=pending`. A background `forwarder` worker pulls the
-job, runs `transcode_to_a4` to normalize every page to A4 (smaller
-pages get centered with white margins; larger pages get scaled-to-fit),
-then streams the resulting PDF to `PRINTER_HOST:PRINTER_PORT`. The
-printer's port-9100 dispatcher detects the format from magic bytes
-and prints on whatever paper is loaded (always A4 in our setup).
+It never queries the real printer — the capabilities are hardcoded in
+`build_standalone()` and announced verbatim. mDNS publication goes through
+`avahi-daemon` via `avahi-publish-service` subprocesses, because iOS's
+AirPrint validator needs RFC 6763 §7.1-compliant subtype PTRs and
+python-zeroconf can't emit those. By default it listens on plain IPP port
+631 (IPPS is optional). When a client POSTs to `/ipp/print`, `ipp_server`
+parses the IPP message (the RFC 8010 codec lives in `ipp_codec`), accepts
+the job, and returns immediately with `job-state=pending`. A background
+`forwarder` worker then pulls the job, runs `transcode_to_a4` to normalize
+every page to A4 — smaller pages centered with white margins, larger pages
+scaled to fit — and streams the resulting PDF to `PRINTER_HOST:PRINTER_PORT`.
+The printer's port-9100 dispatcher detects the format from the magic bytes
+and prints on whatever paper is loaded (always A4 in my setup).
 
 ## License
 
