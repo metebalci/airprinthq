@@ -3,7 +3,9 @@
 The Canon's port-9100 PDF interpreter prints PDFs at the page size
 declared in the file and warns when that doesn't match the loaded
 paper. Since our host always has A4 loaded, we rewrite every page to
-be A4-sized:
+be A4-sized. The A4 target orientation follows the source page, so a
+landscape page lands on landscape A4 instead of being shrunk to fit
+portrait width:
 
 - Page already A4 (within ~0.7mm tolerance): pass through.
 - Page smaller than A4: place on a blank A4 page, centered, 100% size.
@@ -72,28 +74,38 @@ def _pdf_to_a4(pdf_bytes: bytes) -> bytes:
     for page in reader.pages:
         src_w = float(page.mediabox.width)
         src_h = float(page.mediabox.height)
-        if (abs(src_w - A4_W_PT) < TOLERANCE_PT
-                and abs(src_h - A4_H_PT) < TOLERANCE_PT):
+        # Match A4 orientation to the source page. A landscape page goes
+        # onto landscape A4 (842x595); otherwise portrait A4 (595x842).
+        # Without this a landscape photo gets shrunk to fit portrait
+        # width and prints small with wide top/bottom margins.
+        if src_w > src_h:
+            a4_w, a4_h = A4_H_PT, A4_W_PT
+        else:
+            a4_w, a4_h = A4_W_PT, A4_H_PT
+        if (abs(src_w - a4_w) < TOLERANCE_PT
+                and abs(src_h - a4_h) < TOLERANCE_PT):
             writer.add_page(page)
             continue
         # If the source is "close enough" to A4 (Letter is the canonical
         # example), keep content at 100% and just center on A4, accepting
         # up to ~10pt of margin-area clip per side. Otherwise fall back to
         # scale-to-fit (Legal, A3, etc.).
-        w_excess = max(0.0, (src_w - A4_W_PT) / 2)
-        h_excess = max(0.0, (src_h - A4_H_PT) / 2)
+        w_excess = max(0.0, (src_w - a4_w) / 2)
+        h_excess = max(0.0, (src_h - a4_h) / 2)
         if (w_excess <= MAX_CLIP_PER_SIDE_PT
                 and h_excess <= MAX_CLIP_PER_SIDE_PT):
             scale = 1.0
         else:
-            scale = min(A4_W_PT / src_w, A4_H_PT / src_h, 1.0)
+            scale = min(a4_w / src_w, a4_h / src_h, 1.0)
         target_w = src_w * scale
         target_h = src_h * scale
-        tx = (A4_W_PT - target_w) / 2
-        ty = (A4_H_PT - target_h) / 2
-        new_page = writer.add_blank_page(width=A4_W_PT, height=A4_H_PT)
+        tx = (a4_w - target_w) / 2
+        ty = (a4_h - target_h) / 2
+        new_page = writer.add_blank_page(width=a4_w, height=a4_h)
         new_page.merge_transformed_page(
             page, Transformation().scale(scale).translate(tx, ty))
+        log.info("page %.0fx%.0f -> A4 %.0fx%.0f scale=%.3f",
+                 src_w, src_h, a4_w, a4_h, scale)
         rewrote_any = True
 
     if not rewrote_any:
