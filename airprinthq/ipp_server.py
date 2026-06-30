@@ -67,6 +67,22 @@ def _op_group(request: ipp.IppMessage) -> dict[str, ipp.Attribute]:
     return {a.name: a for a in g.attributes}
 
 
+def _job_template_attr(request: ipp.IppMessage,
+                       name: str) -> Optional[ipp.Attribute]:
+    """Look up a Job Template attribute (sides, copies, media, ...).
+
+    Per RFC 8011 these live in the job-attributes group (TAG_JOB); iOS
+    sends them there. Fall back to the operation group for lenient clients.
+    """
+    for tag in (ipp.TAG_JOB, ipp.TAG_OPERATION):
+        g = request.group(tag)
+        if g is not None:
+            for a in g.attributes:
+                if a.name == name:
+                    return a
+    return None
+
+
 def _string_value(attr: Optional[ipp.Attribute], default: str = "") -> str:
     if attr is None or not attr.values:
         return default
@@ -147,11 +163,12 @@ def op_print_job(state: ServerState, request: ipp.IppMessage) -> ipp.IppMessage:
     op = _op_group(request)
     job_name = _string_value(op.get("job-name"), "AirPrint job")
     copies = max(1, _int_value(op.get("copies"), 1))
+    sides = _string_value(_job_template_attr(request, "sides"), "one-sided")
     document = request.data
     if not document:
         log.warning("Print-Job with no document data")
     job = Job(job_id=state.new_job_id(), name=job_name, document=document,
-              copies=copies)
+              copies=copies, sides=sides)
     state.jobs[job.job_id] = job
     state.forwarder.submit(job)
     resp = _base_response(request, ipp.STATUS_OK)
@@ -163,8 +180,9 @@ def op_create_job(state: ServerState, request: ipp.IppMessage) -> ipp.IppMessage
     op = _op_group(request)
     job_name = _string_value(op.get("job-name"), "AirPrint job")
     copies = max(1, _int_value(op.get("copies"), 1))
+    sides = _string_value(_job_template_attr(request, "sides"), "one-sided")
     job = Job(job_id=state.new_job_id(), name=job_name, document=b"",
-              copies=copies)
+              copies=copies, sides=sides)
     state.jobs[job.job_id] = job
     state.pending_buffers[job.job_id] = bytearray()
     resp = _base_response(request, ipp.STATUS_OK)

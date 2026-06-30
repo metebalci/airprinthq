@@ -72,7 +72,28 @@ a simple TCP loop: for `copies=N`, it sends the transcoded PDF to port 9100
 `N` times. With URF jobs iOS usually expands the copies into a multi-page
 URF document itself, so each page is already one copy and the forwarder
 just sends that PDF once — same result either way. Cancellation works both
-between copies and mid-stream within a copy.
+between copies and mid-stream within a copy. (The TCP loop gives *collated*
+copies and works on any printer; the Canon's PJL has only uncollated
+`COPIES` and no `QTY`, so the loop stays.)
+
+**Double-sided (duplex).** iOS's two-sided toggle sends an IPP `sides`
+attribute (`two-sided-long-edge` / `two-sided-short-edge`) in the job-
+attributes group. Raw port-9100 printing carries no IPP attributes, so the
+request has to be embedded in the byte stream: when `sides` is two-sided,
+the forwarder prepends a PJL header — `@PJL SET DUPLEX=ON` plus
+`SET BINDING=LONGEDGE` (long-edge) or `SHORTEDGE` (short-edge) — ahead of
+the PDF and terminates the job with the UEL. The Canon's port-9100
+dispatcher honors PJL, so it duplexes. The header is only added for PDF
+output (a passthrough JPEG/TIFF is one image and is left untouched).
+Color is the opposite story: this Canon exposes *no* PJL color/grayscale
+variable at all (verified with `@PJL INFO VARIABLES`), so B&W can't be
+forced the same way — see Deferred below.
+
+**Advertised resolution.** `caps.py` advertises the Canon's real
+`600`/`1200` dpi (default 600, matching the URF `RS600` raster
+resolution) rather than a flat `300`. This is cosmetic for PDF jobs —
+the printer always rasterizes a PDF at its native resolution regardless
+of what we announce — but it stops under-reporting the hardware.
 
 ## What works, what doesn't
 
@@ -92,6 +113,10 @@ between copies and mid-stream within a copy.
   (`airprinthq/urf.py`) → multi-page PDF → A4 normalizer → printer.
 - Multi-copy via TCP-loop when iOS sets `copies=N` in IPP; when iOS
   inlines copies as extra URF pages, those go through naturally.
+- Double-sided printing: iOS's two-sided selection (the IPP `sides`
+  attribute) is honored by injecting a PJL `SET DUPLEX=ON` /
+  `SET BINDING=…` header ahead of the PDF — long-edge and short-edge
+  binding both supported.
 - Dual-stack TCP listener (IPv4 + IPv6) — iOS can use whichever it
   prefers; in practice it picks IPv6 when our AAAA record is reachable.
 - Optional IPPS (TLS) endpoint on a separate port — disabled by default
@@ -120,9 +145,12 @@ between copies and mid-stream within a copy.
 - True B&W output for the path where iOS sends a *color* PDF with an
   IPP `print-color-mode=monochrome` flag (rare — iOS prefers URF for
   B&W when our `print-color-mode-supported` advertises `monochrome`,
-  and the URF path now works correctly). Implementing would require
-  reading the IPP attribute and rewriting the PDF in grayscale via
-  pypdf — substantial work for marginal benefit.
+  and the URF path now works correctly). The Canon has no PJL color
+  variable (confirmed via `@PJL INFO VARIABLES` — every candidate
+  returns `"?"`), so it can't be pushed to the printer the way duplex
+  is; the only route is converting the PDF to grayscale in the proxy
+  (e.g. a Ghostscript `-sColorConversionStrategy=Gray` pass). Deferred
+  as a rare need.
 - A real web admin page at the `adminurl` (currently the URL points at
   our IPP port, which returns 405 Method Not Allowed for browser GETs;
   iOS doesn't seem to care).

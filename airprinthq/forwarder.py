@@ -60,12 +60,36 @@ def _save(dir_: str, job_id: int, data: bytes, label: str) -> None:
         log.exception("save-%s failed", label)
 
 
+# PJL Universal Exit Language sequence (HP PJL Technical Reference). Raw
+# port-9100 printing carries no IPP attributes, so duplex must be embedded
+# in the byte stream: the Canon's port-9100 dispatcher recognises the UEL
+# and honours the SET DUPLEX / SET BINDING commands before entering the PDF
+# interpreter. Without this, the printer falls back to its own one-sided
+# default no matter what iOS requested.
+_UEL = b"\x1b%-12345X"
+
+
+def _wrap_pjl_duplex(document: bytes, sides: str) -> bytes:
+    """Prepend a PJL header telling the printer to print two-sided.
+
+    `sides` is the IPP keyword: two-sided-long-edge (book binding) or
+    two-sided-short-edge (tablet/notepad binding).
+    """
+    binding = b"SHORTEDGE" if sides == "two-sided-short-edge" else b"LONGEDGE"
+    header = (_UEL + b"@PJL\r\n"
+              b"@PJL SET DUPLEX=ON\r\n"
+              b"@PJL SET BINDING=" + binding + b"\r\n"
+              b"@PJL ENTER LANGUAGE=PDF\r\n")
+    return header + document + _UEL
+
+
 @dataclass
 class Job:
     job_id: int
     name: str
     document: bytes
     copies: int = 1                 # honored by the forwarder: N TCP sends
+    sides: str = "one-sided"        # one-sided | two-sided-long-edge | two-sided-short-edge
     state: str = "pending"          # pending | processing | completed | canceled | aborted
     cancelled: bool = False
     done: asyncio.Event = field(default_factory=asyncio.Event)
@@ -123,6 +147,19 @@ class Forwarder:
             job.done.set()
             log.exception("job %s: transcode failed; aborted", job.job_id)
             return
+        if job.sides != "one-sided":
+            # The PJL header enters the PDF interpreter, so only wrap PDF
+            # output. Default config makes everything downstream PDF (PDF
+            # passthrough + URF->PDF); a passthrough JPEG/TIFF is one image
+            # (duplex is moot) and must not be prefixed with PJL.
+            if document[:4] == b"%PDF":
+                document = _wrap_pjl_duplex(document, job.sides)
+                log.info("job %s: requested %s -> PJL duplex header prepended",
+                         job.job_id, job.sides)
+            else:
+                log.info("job %s: %s requested but output is not PDF (%r); "
+                         "duplex header skipped", job.job_id, job.sides,
+                         bytes(document[:4]))
         if _SAVE_OUTGOING_DIR:
             _save(_SAVE_OUTGOING_DIR, job.job_id, document, "outgoing")
         if self.host is None:

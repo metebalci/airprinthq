@@ -162,9 +162,10 @@ def build_standalone(bonjour_name: str,
         ipp.str_attr("media-default", ipp.TAG_KEYWORD, media_default),
         ipp.str_attr("media-supported", ipp.TAG_KEYWORD, *media),
         ipp.attr("printer-resolution-default", ipp.TAG_RESOLUTION,
-                 ipp.encode_resolution(300, 300, 3)),
+                 ipp.encode_resolution(600, 600, 3)),
         ipp.attr("printer-resolution-supported", ipp.TAG_RESOLUTION,
-                 ipp.encode_resolution(300, 300, 3)),
+                 ipp.encode_resolution(600, 600, 3),
+                 ipp.encode_resolution(1200, 1200, 3)),
     ])
     uris = [u for u in (ipp_uri, ipps_uri) if u]
     security = [s for s, u in (("none", ipp_uri), ("tls", ipps_uri)) if u]
